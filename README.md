@@ -1,5 +1,7 @@
 # fairgate
 
+[![Go Reference](https://pkg.go.dev/badge/thde.io/fairgate.svg)](https://pkg.go.dev/thde.io/fairgate) [![test](https://github.com/thde/fakeword/actions/workflows/test.yml/badge.svg)](https://github.com/thde/fakeword/actions/workflows/test.yml) [![Go Report Card](https://goreportcard.com/badge/thde.io/fairgate)](https://goreportcard.com/report/thde.io/fairgate)
+
 This Go package wraps the [Fairgate Standard API](https://fsa.fairgate.ch/docs/fsa_openapi3) with a small, battery-included Go client.
 
 ## Features
