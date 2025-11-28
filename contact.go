@@ -116,7 +116,7 @@ type ContactBasefields struct {
 	// Gender is the gender of the contact.
 	Gender Gender `json:"gender,omitempty"`
 	// LastUpdate is the date when the contact was last updated.
-	LastUpdate string `json:"last_update,omitempty"`
+	LastUpdate Time `json:"last_update"`
 }
 
 // Membership represents membership information.
@@ -124,7 +124,7 @@ type Membership struct {
 	// Membership is the membership type of the contact.
 	Membership string `json:"membership,omitempty"`
 	// FirstJoiningDate is the date and time when the contact first joined.
-	FirstJoiningDate string `json:"first_joining_date,omitempty"`
+	FirstJoiningDate Time `json:"first_joining_date"`
 }
 
 // ExecutiveBoard represents executive board function assignments.
@@ -170,7 +170,7 @@ type Federation struct {
 	// FederationMembership is the fed membership of the contact.
 	FederationMembership string `json:"federation_membership,omitempty"`
 	// FederationFirstJoiningDate is the date and time when the contact first joined the federation.
-	FederationFirstJoiningDate string `json:"federation_first_joining_date,omitempty"`
+	FederationFirstJoiningDate Time `json:"federation_first_joining_date"`
 }
 
 // Address represents address information.
