@@ -2,6 +2,7 @@ package fairgate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -14,14 +15,22 @@ import (
 // https://fsa.fairgate.ch/documentation/getting-started/fsa-sdk/
 var signingMethod = jwt.SigningMethodES512
 
-type tokenStore struct {
-	sync.Mutex
+const (
+	// tokenLeeway is the clock skew tolerated when validating tokens.
+	tokenLeeway = 2 * time.Minute
+	// refreshMargin is how long before expiry a token is refreshed.
+	refreshMargin = 2 * time.Minute
+)
 
+// tokenStore holds the client's credentials. mu guards all fields and is
+// held for the duration of a token request, so concurrent callers wait
+// for a single create or refresh instead of each issuing their own.
+type tokenStore struct {
+	mu           sync.Mutex
 	token        string
 	refreshToken string
 	accessKey    string
-
-	claim *jwtClaim
+	claim        *jwtClaim
 
 	keyFunc jwt.Keyfunc
 	parser  *jwt.Parser
@@ -34,74 +43,109 @@ type jwtClaim struct {
 	jwt.RegisteredClaims
 }
 
+// CreateTokenRequest is the body of a token creation request.
 type CreateTokenRequest struct {
 	AccessKey string `json:"access_key"`
 }
 
+// CreateTokenResponse is returned by the token creation and refresh endpoints.
 type CreateTokenResponse struct {
 	Token        string `json:"token"`
 	RefreshToken string `json:"refresh_token"`
 }
 
-// TokenCreate generates a JWT token using an access key.
-func (c *Client) TokenCreate(ctx context.Context, accessKey string) error {
-	c.auth.Lock()
-	defer c.auth.Unlock()
-
-	if accessKey == "" {
-		return ErrNoAccessKey
-	}
-
-	req, err := c.newRequest(ctx,
-		http.MethodPost,
-		c.orgPath("/fsa/v1.1/auth/create/%s/token"),
-		nil,
-		CreateTokenRequest{AccessKey: accessKey},
-	)
-	if err != nil {
-		return err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	data, err := decodeResponse[CreateTokenResponse](resp)
-	if err != nil {
-		return err
-	}
-
-	return c.auth.updateToken(data)
-}
-
+// RefreshTokenRequest is the body of a token refresh request.
 type RefreshTokenRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-// TokenRefresh refreshes the JWT token if necessary.
-func (c *Client) TokenRefresh(ctx context.Context) error {
-	c.auth.Lock()
-	if c.auth.token == "" {
-		c.auth.Unlock()
-		return c.TokenCreate(ctx, c.auth.accessKey)
+// TokenCreate creates a token using accessKey. On success the access key is
+// kept, so the client can create a new token once the refresh token is no
+// longer accepted. Calling it is only needed if [WithAccessKey] was not used.
+func (c *Client) TokenCreate(ctx context.Context, accessKey string) error {
+	if accessKey == "" {
+		return ErrNoAccessKey
 	}
 
-	defer c.auth.Unlock()
+	c.auth.mu.Lock()
+	defer c.auth.mu.Unlock()
+
+	if err := c.createToken(ctx, accessKey); err != nil {
+		return err
+	}
+	c.auth.accessKey = accessKey
+
+	return nil
+}
+
+// TokenRefresh creates or refreshes the token if it is missing or about to
+// expire. API calls do this automatically.
+func (c *Client) TokenRefresh(ctx context.Context) error {
+	_, err := c.validToken(ctx)
+	return err
+}
+
+// validToken returns a token that is valid for at least refreshMargin,
+// creating or refreshing it as needed. If a refresh fails and an access key
+// is available, a new token is created instead.
+func (c *Client) validToken(ctx context.Context) (string, error) {
+	c.auth.mu.Lock()
+	defer c.auth.mu.Unlock()
+
+	if c.auth.token == "" {
+		if err := c.createToken(ctx, c.auth.accessKey); err != nil {
+			return "", err
+		}
+		return c.auth.token, nil
+	}
 
 	if !c.auth.shouldRefresh(time.Now()) {
-		return nil
+		return c.auth.token, nil
 	}
 
+	err := c.refreshToken(ctx)
+	if err != nil && c.auth.accessKey != "" {
+		if createErr := c.createToken(ctx, c.auth.accessKey); createErr != nil {
+			return "", errors.Join(err, createErr)
+		}
+		err = nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return c.auth.token, nil
+}
+
+// createToken obtains a new token using accessKey. c.auth.mu must be held.
+func (c *Client) createToken(ctx context.Context, accessKey string) error {
+	if accessKey == "" {
+		return ErrNoAccessKey
+	}
+
+	return c.authRequest(ctx,
+		c.orgPath("/fsa/v1.1/auth/create/%s/token"),
+		CreateTokenRequest{AccessKey: accessKey},
+	)
+}
+
+// refreshToken obtains a new token using the stored refresh token.
+// c.auth.mu must be held.
+func (c *Client) refreshToken(ctx context.Context) error {
 	if c.auth.refreshToken == "" {
 		return ErrNoRefreshToken
 	}
 
-	reqBody := RefreshTokenRequest{RefreshToken: c.auth.refreshToken}
-	path := c.orgPath("/fsa/v1.1/auth/refresh/%s/token")
+	return c.authRequest(ctx,
+		c.orgPath("/fsa/v1.1/auth/refresh/%s/token"),
+		RefreshTokenRequest{RefreshToken: c.auth.refreshToken},
+	)
+}
 
-	req, err := c.newRequest(ctx, http.MethodPost, path, nil, reqBody)
+// authRequest posts body to a token endpoint and stores the returned
+// token. c.auth.mu must be held.
+func (c *Client) authRequest(ctx context.Context, path string, body any) error {
+	req, err := c.newRequest(ctx, http.MethodPost, path, nil, body)
 	if err != nil {
 		return err
 	}
@@ -120,16 +164,10 @@ func (c *Client) TokenRefresh(ctx context.Context) error {
 	return c.auth.updateToken(data)
 }
 
-// shouldRefresh checks if token needs refreshing.
+// shouldRefresh reports whether the token is missing or expires within
+// refreshMargin of now.
 func (ts *tokenStore) shouldRefresh(now time.Time) bool {
-	if ts == nil {
-		return true
-	}
-
-	if ts.token == "" {
-		return true
-	}
-	if ts.claim == nil {
+	if ts.token == "" || ts.claim == nil {
 		return true
 	}
 
@@ -139,10 +177,10 @@ func (ts *tokenStore) shouldRefresh(now time.Time) bool {
 		return false
 	}
 
-	return now.Add(2 * time.Minute).After(exp.Time)
+	return now.Add(refreshMargin).After(exp.Time)
 }
 
-// updateToken validates and updates the token store.
+// updateToken validates and stores the token pair.
 func (ts *tokenStore) updateToken(resp CreateTokenResponse) error {
 	claim, err := ts.validateToken(resp.Token)
 	if err != nil {
@@ -156,16 +194,12 @@ func (ts *tokenStore) updateToken(resp CreateTokenResponse) error {
 	return nil
 }
 
-// validateToken gets the expiration time from a JWT.
+// validateToken verifies the token's signature and returns its claims.
 func (ts *tokenStore) validateToken(tokenString string) (*jwtClaim, error) {
-	token, err := ts.parser.ParseWithClaims(tokenString, &jwtClaim{}, ts.keyFunc)
-	if err != nil {
-		return nil, fmt.Errorf("unable to parse token: %w", err)
+	claim := &jwtClaim{}
+	if _, err := ts.parser.ParseWithClaims(tokenString, claim, ts.keyFunc); err != nil {
+		return nil, fmt.Errorf("fairgate: parse token: %w", err)
 	}
 
-	if claim, ok := token.Claims.(*jwtClaim); ok {
-		return claim, nil
-	}
-
-	return nil, fmt.Errorf("token doesn't contain claim details")
+	return claim, nil
 }

@@ -110,10 +110,10 @@ func New(orgID string, key *ecdsa.PublicKey, opts ...ClientOption) *Client {
 		auth: &tokenStore{
 			parser: jwt.NewParser(
 				jwt.WithValidMethods([]string{signingMethod.Alg()}),
-				jwt.WithLeeway(2*time.Minute),
+				jwt.WithLeeway(tokenLeeway),
 				jwt.WithExpirationRequired(),
 			),
-			keyFunc: func(verifyKey *jwt.Token) (any, error) {
+			keyFunc: func(*jwt.Token) (any, error) {
 				return key, nil
 			},
 		},

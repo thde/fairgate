@@ -68,12 +68,11 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
-	if err := c.TokenRefresh(req.Context()); err != nil {
+	token, err := c.validToken(req.Context())
+	if err != nil {
 		return nil, err
 	}
-	c.auth.Lock()
-	req.Header.Set("Authorization", "Bearer "+c.auth.token)
-	c.auth.Unlock()
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

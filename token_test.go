@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,13 +98,6 @@ func TestTokenStore_shouldRefresh(t *testing.T) {
 			checkTime:   time.Now(),
 			wantRefresh: true,
 		},
-		{
-			name:        "nil tokenStore should refresh",
-			token:       "",
-			expiresAt:   time.Time{},
-			checkTime:   time.Now(),
-			wantRefresh: true,
-		},
 	}
 
 	for _, tt := range tests {
@@ -131,14 +125,6 @@ func TestTokenStore_shouldRefresh_NoExpiry(t *testing.T) {
 	ts := &tokenStore{token: "test-token", claim: &jwtClaim{}}
 	if ts.shouldRefresh(time.Now()) {
 		t.Error("shouldRefresh() = true for token without expiry, want false")
-	}
-}
-
-func TestTokenStore_shouldRefresh_NilStore(t *testing.T) {
-	var ts *tokenStore
-	got := ts.shouldRefresh(time.Now())
-	if !got {
-		t.Error("shouldRefresh() on nil store should return true")
 	}
 }
 
@@ -630,9 +616,9 @@ func TestClient_TokenRefresh_ConcurrentCalls(t *testing.T) {
 	privateKey, publicKey := generateTestKeyPair(t)
 	newTokenString := createTestToken(t, privateKey, time.Now().Add(1*time.Hour))
 
-	var callCount int
+	var callCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		time.Sleep(50 * time.Millisecond) // Simulate network delay
 		resp := Response[CreateTokenResponse]{
 			Code:    200,
@@ -675,9 +661,71 @@ func TestClient_TokenRefresh_ConcurrentCalls(t *testing.T) {
 		}
 	}
 
-	// Due to locking, all calls should succeed
-	// The exact number of server calls depends on timing
-	if callCount == 0 {
-		t.Error("server should have been called at least once")
+	// Refreshes are serialized, so only the first caller hits the server.
+	if got := callCount.Load(); got != 1 {
+		t.Errorf("server called %d times, want 1", got)
+	}
+}
+
+func TestClient_TokenRefresh_FallsBackToCreate(t *testing.T) {
+	privateKey, publicKey := generateTestKeyPair(t)
+	newToken := createTestToken(t, privateKey, time.Now().Add(1*time.Hour))
+
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if strings.Contains(r.URL.Path, "/auth/refresh/") {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).
+				Encode(Response[any]{Code: 401, Message: "refresh token expired"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Response[CreateTokenResponse]{
+			Success: true,
+			Data:    CreateTokenResponse{Token: newToken, RefreshToken: "new-refresh"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-org", publicKey,
+		WithHTTPClient(server.Client()),
+		WithBaseURL(mustParseURL(server.URL)),
+		WithAccessKey("access-key"),
+	)
+	client.auth.token = "old-token"
+	client.auth.refreshToken = "old-refresh"
+
+	if err := client.TokenRefresh(context.Background()); err != nil {
+		t.Fatalf("TokenRefresh() error = %v", err)
+	}
+	if client.auth.token != newToken {
+		t.Error("token was not replaced by a newly created one")
+	}
+	if len(paths) != 2 || !strings.Contains(paths[1], "/auth/create/") {
+		t.Errorf("requests = %v, want refresh followed by create", paths)
+	}
+}
+
+func TestClient_TokenCreate_StoresAccessKey(t *testing.T) {
+	privateKey, publicKey := generateTestKeyPair(t)
+	token := createTestToken(t, privateKey, time.Now().Add(1*time.Hour))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(Response[CreateTokenResponse]{
+			Success: true,
+			Data:    CreateTokenResponse{Token: token, RefreshToken: "refresh"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-org", publicKey,
+		WithHTTPClient(server.Client()),
+		WithBaseURL(mustParseURL(server.URL)),
+	)
+	if err := client.TokenCreate(context.Background(), "access-key"); err != nil {
+		t.Fatalf("TokenCreate() error = %v", err)
+	}
+	if client.auth.accessKey != "access-key" {
+		t.Errorf("accessKey = %q, want access-key", client.auth.accessKey)
 	}
 }
