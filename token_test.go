@@ -128,6 +128,13 @@ func TestTokenStore_shouldRefresh(t *testing.T) {
 	}
 }
 
+func TestTokenStore_shouldRefresh_NoExpiry(t *testing.T) {
+	ts := &tokenStore{token: "test-token", claim: &jwtClaim{}}
+	if ts.shouldRefresh(time.Now()) {
+		t.Error("shouldRefresh() = true for token without expiry, want false")
+	}
+}
+
 func TestTokenStore_shouldRefresh_NilStore(t *testing.T) {
 	var ts *tokenStore
 	got := ts.shouldRefresh(time.Now())

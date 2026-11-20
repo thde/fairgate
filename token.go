@@ -155,7 +155,13 @@ func (ts *tokenStore) shouldRefresh(now time.Time) bool {
 		return true
 	}
 
-	return now.Add(2 * time.Minute).After(ts.claim.ExpiresAt.Time)
+	exp, err := ts.claim.GetExpirationTime()
+	if err != nil || exp == nil {
+		// A token without an expiry never expires.
+		return false
+	}
+
+	return now.Add(2 * time.Minute).After(exp.Time)
 }
 
 // updateToken validates and updates the token store.

@@ -114,6 +114,7 @@ func New(oid string, key *ecdsa.PublicKey, opts ...ClientOption) *Client {
 			parser: jwt.NewParser(
 				jwt.WithValidMethods([]string{signingMethod.Alg()}),
 				jwt.WithLeeway(2*time.Minute),
+				jwt.WithExpirationRequired(),
 			),
 			keyFunc: func(verifyKey *jwt.Token) (any, error) {
 				return key, nil
