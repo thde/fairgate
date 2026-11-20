@@ -3,6 +3,8 @@ package fairgate
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -376,8 +378,11 @@ func TestClient_wait_ConcurrentAccess(t *testing.T) {
 }
 
 // newAuthenticatedTestClient returns a client for server with a valid token
-// already in place.
-func newAuthenticatedTestClient(t *testing.T, server *httptest.Server) *Client {
+// already in place, and the key that signs the client's tokens.
+func newAuthenticatedTestClient(
+	t *testing.T,
+	server *httptest.Server,
+) (*Client, *ecdsa.PrivateKey) {
 	t.Helper()
 	privateKey, publicKey := generateTestKeyPair(t)
 
@@ -393,7 +398,7 @@ func newAuthenticatedTestClient(t *testing.T, server *httptest.Server) *Client {
 		t.Fatalf("updateToken() error = %v", err)
 	}
 
-	return c
+	return c, privateKey
 }
 
 func TestClient_do_RetriesRateLimit(t *testing.T) {
@@ -412,7 +417,7 @@ func TestClient_do_RetriesRateLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newAuthenticatedTestClient(t, server)
+	c, _ := newAuthenticatedTestClient(t, server)
 	req, err := c.newRequest(context.Background(), http.MethodPost, "/x", nil, "payload")
 	if err != nil {
 		t.Fatal(err)
@@ -439,7 +444,7 @@ func TestClient_do_RateLimitGivesUp(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newAuthenticatedTestClient(t, server)
+	c, _ := newAuthenticatedTestClient(t, server)
 	req, err := c.newRequest(context.Background(), http.MethodGet, "/x", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -461,7 +466,7 @@ func TestClient_do_StatusError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newAuthenticatedTestClient(t, server)
+	c, _ := newAuthenticatedTestClient(t, server)
 	_, err := c.Contact(context.Background(), 1)
 
 	var apiErr *APIError
@@ -470,5 +475,77 @@ func TestClient_do_StatusError(t *testing.T) {
 	}
 	if apiErr.StatusCode != http.StatusNotFound || apiErr.Message != "contact not found" {
 		t.Errorf("APIError = %+v", apiErr)
+	}
+}
+
+func TestClient_do_ReauthenticatesOnce(t *testing.T) {
+	var freshToken atomic.Value
+	var apiCalls, refreshCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/auth/refresh/") {
+			refreshCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(Response[CreateTokenResponse]{
+				Success: true,
+				Data:    CreateTokenResponse{Token: freshToken.Load().(string), RefreshToken: "r2"},
+			})
+			return
+		}
+
+		apiCalls.Add(1)
+		if r.Header.Get("Authorization") != "Bearer "+freshToken.Load().(string) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true,"data":"ok"}`))
+	}))
+	defer server.Close()
+
+	c, privateKey := newAuthenticatedTestClient(t, server)
+	freshToken.Store(createTestToken(t, privateKey, time.Now().Add(2*time.Hour)))
+
+	req, err := c.newRequest(context.Background(), http.MethodGet, "/x", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doJSON[string](c, req); err != nil {
+		t.Fatalf("doJSON() error = %v", err)
+	}
+	if apiCalls.Load() != 2 || refreshCalls.Load() != 1 {
+		t.Errorf("api calls = %d, refresh calls = %d, want 2 and 1",
+			apiCalls.Load(), refreshCalls.Load())
+	}
+}
+
+func TestClient_do_ReauthenticatesOnlyOnce(t *testing.T) {
+	var freshToken atomic.Value
+	var apiCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/auth/refresh/") {
+			_ = json.NewEncoder(w).Encode(Response[CreateTokenResponse]{
+				Success: true,
+				Data:    CreateTokenResponse{Token: freshToken.Load().(string), RefreshToken: "r2"},
+			})
+			return
+		}
+		apiCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	c, privateKey := newAuthenticatedTestClient(t, server)
+	freshToken.Store(createTestToken(t, privateKey, time.Now().Add(2*time.Hour)))
+
+	req, err := c.newRequest(context.Background(), http.MethodGet, "/x", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.do(req)
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("do() error = %v, want 401 APIError", err)
+	}
+	if n := apiCalls.Load(); n != 2 {
+		t.Errorf("api calls = %d, want 2", n)
 	}
 }

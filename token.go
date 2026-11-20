@@ -117,6 +117,17 @@ func (c *Client) validToken(ctx context.Context) (string, error) {
 	return c.auth.token, nil
 }
 
+// invalidateToken forces the next validToken call to refresh, unless the
+// token has already been replaced by another caller.
+func (c *Client) invalidateToken(token string) {
+	c.auth.mu.Lock()
+	defer c.auth.mu.Unlock()
+
+	if c.auth.token == token {
+		c.auth.claim = nil
+	}
+}
+
 // createToken obtains a new token using accessKey. c.auth.mu must be held.
 func (c *Client) createToken(ctx context.Context, accessKey string) error {
 	if accessKey == "" {

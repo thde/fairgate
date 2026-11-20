@@ -67,10 +67,12 @@ func doJSON[T any](c *Client, req *http.Request) (T, error) {
 }
 
 // do sends the request with authentication, retrying up to maxAttempts
-// times while rate limited. It returns a response with a 2xx status, or an
-// error. req itself is not modified.
+// times while rate limited and once with a fresh token if the token was
+// rejected. It returns a response with a 2xx status, or an error.
+// req itself is not modified.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
 	ctx := req.Context()
+	reauthenticated := false
 
 	for attempt := 1; ; attempt++ {
 		if err := c.wait(ctx); err != nil {
@@ -100,6 +102,11 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		apiErr := newAPIError(resp)
 		drainAndClose(resp.Body)
 
+		if resp.StatusCode == http.StatusUnauthorized && !reauthenticated && attempt < maxAttempts {
+			reauthenticated = true
+			c.invalidateToken(token)
+			continue
+		}
 		if resp.StatusCode != http.StatusTooManyRequests {
 			return nil, apiErr
 		}
