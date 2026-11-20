@@ -4,8 +4,6 @@ import (
 	"context"
 	"iter"
 	"net/http"
-
-	"github.com/google/go-querystring/query"
 )
 
 // Contact is a member of the organisation with extended details.
@@ -222,16 +220,11 @@ func (c *Client) ContactsIter(ctx context.Context) iter.Seq2[Contact, error] {
 
 // Contacts retrieves a single page of contacts.
 func (c *Client) Contacts(ctx context.Context, params PageParams) (*ContactsList, error) {
-	v, err := query.Values(params)
-	if err != nil {
-		return nil, err
-	}
-
 	req, err := c.newRequest(
 		ctx,
 		http.MethodGet,
 		c.orgPath("/fsa/v2.0/contact/%s/contacts/extended"),
-		v,
+		params.values(),
 		nil,
 	)
 	if err != nil {

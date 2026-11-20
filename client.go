@@ -19,7 +19,8 @@ const (
 	// TestURL is the official test endpoint.
 	TestURL = "https://fsa-test.fairgate.ch/"
 
-	modulePath = "thde.io/fairgate"
+	modulePath     = "thde.io/fairgate"
+	defaultTimeout = 30 * time.Second
 )
 
 var (
@@ -104,7 +105,7 @@ func New(orgID string, key *ecdsa.PublicKey, opts ...ClientOption) *Client {
 	c := &Client{
 		baseURL: productionURL,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: defaultTimeout,
 		},
 		orgID: orgID,
 		auth: &tokenStore{

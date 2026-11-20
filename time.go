@@ -5,16 +5,17 @@ import (
 	"time"
 )
 
-// Time supports unmarshalling times returned by the Fairgate API.
+// Time is a [time.Time] that decodes JSON null and "" as the zero time.
 type Time struct {
 	time.Time
 }
 
-// UnmarshalJSON implements the [json.Unmarshaler] interface.
-func (m *Time) UnmarshalJSON(data []byte) error {
-	if string(data) == "null" || string(data) == `""` {
+// UnmarshalJSON implements [json.Unmarshaler].
+func (t *Time) UnmarshalJSON(data []byte) error {
+	switch string(data) {
+	case "null", `""`:
 		return nil
 	}
 
-	return json.Unmarshal(data, &m.Time)
+	return json.Unmarshal(data, &t.Time)
 }

@@ -34,17 +34,20 @@ func (c *Client) newRequest(
 	if body != nil {
 		jsonData, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("marshal request: %w", err)
+			return nil, fmt.Errorf("fairgate: marshal request: %w", err)
 		}
 		reqBody = bytes.NewReader(jsonData)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("fairgate: create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "en")
 	req.Header.Set("User-Agent", c.userAgent)
 

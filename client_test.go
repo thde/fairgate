@@ -68,3 +68,20 @@ func TestWithBaseURL_Copies(t *testing.T) {
 		t.Errorf("baseURL.Host = %q, want a.example.com", c.baseURL.Host)
 	}
 }
+
+func TestPageParams_values(t *testing.T) {
+	tests := []struct {
+		params PageParams
+		want   string
+	}{
+		{PageParams{}, ""},
+		{PageParams{PageNo: 2}, "pageNo=2"},
+		{PageParams{PageNo: 3, PageLimit: 50}, "pageLimit=50&pageNo=3"},
+	}
+
+	for _, tt := range tests {
+		if got := tt.params.values().Encode(); got != tt.want {
+			t.Errorf("%+v.values() = %q, want %q", tt.params, got, tt.want)
+		}
+	}
+}

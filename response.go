@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 )
 
 // Response is the envelope wrapping every Fairgate API response.
@@ -43,7 +45,7 @@ func decodeResponse[T any](resp *http.Response) (T, error) {
 	return r.Data, nil
 }
 
-// Pagination represents pagination information from the API.
+// Pagination describes the page returned by a list endpoint.
 type Pagination struct {
 	TotalRecords int `json:"totalRecords,omitempty"`
 	TotalPages   int `json:"totalPages,omitempty"`
@@ -51,8 +53,21 @@ type Pagination struct {
 	PageLimit    int `json:"pageLimit,omitempty"`
 }
 
-// PageParams represents pagination parameters for API requests.
+// PageParams selects a page of a list endpoint. Zero values are omitted,
+// leaving the choice to the API.
 type PageParams struct {
-	PageNo    int `url:"pageNo,omitempty"`
-	PageLimit int `url:"pageLimit,omitempty"`
+	PageNo    int
+	PageLimit int
+}
+
+// values encodes p as query parameters.
+func (p PageParams) values() url.Values {
+	v := url.Values{}
+	if p.PageNo != 0 {
+		v.Set("pageNo", strconv.Itoa(p.PageNo))
+	}
+	if p.PageLimit != 0 {
+		v.Set("pageLimit", strconv.Itoa(p.PageLimit))
+	}
+	return v
 }
