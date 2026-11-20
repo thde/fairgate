@@ -8,7 +8,7 @@ import (
 	"github.com/google/go-querystring/query"
 )
 
-// Contact represents the extended contact data structure.
+// Contact is a member of the organisation with extended details.
 type Contact struct {
 	Basefields ContactBasefields `json:"basefields,omitzero"`
 	// Status is the status of the contact.
@@ -29,9 +29,10 @@ type Contact struct {
 	SubfedAssignments []SubFedAssignment `json:"subfed_assignments,omitempty"`
 }
 
+// ContactsList is a single page of contacts.
 type ContactsList struct {
-	Pagination `json:",inline"`
-	Contacts   []Contact `json:"contacts,omitempty"`
+	Pagination
+	Contacts []Contact `json:"contacts,omitempty"`
 }
 
 // ContactStatus defines the status of a contact.
@@ -182,8 +183,8 @@ type Address struct {
 	City string `json:"city,omitempty"`
 	// State of the address.
 	State string `json:"state,omitempty"`
-	// PostaleCode of the address.
-	PostaleCode string `json:"postale_code,omitempty"`
+	// PostalCode of the address.
+	PostalCode string `json:"postale_code,omitempty"`
 	// Country of the address.
 	Country string `json:"country,omitempty"`
 	// PostOfficeBox of the address.
@@ -207,7 +208,8 @@ func (c *Client) Contact(ctx context.Context, contactID int) (*Contact, error) {
 	return &contact, nil
 }
 
-// ContactsIter returns an iterator over all contacts.
+// ContactsIter returns an iterator over all contacts, fetching pages as
+// needed. Iteration stops after the first error.
 func (c *Client) ContactsIter(ctx context.Context) iter.Seq2[Contact, error] {
 	return iterate(ctx, func(ctx context.Context, p PageParams) ([]Contact, Pagination, error) {
 		list, err := c.Contacts(ctx, p)
@@ -218,7 +220,7 @@ func (c *Client) ContactsIter(ctx context.Context) iter.Seq2[Contact, error] {
 	})
 }
 
-// Contacts retrieves contacts with extended data for an organization.
+// Contacts retrieves a single page of contacts.
 func (c *Client) Contacts(ctx context.Context, params PageParams) (*ContactsList, error) {
 	v, err := query.Values(params)
 	if err != nil {
