@@ -45,8 +45,8 @@ type Client struct {
 
 	auth *tokenStore
 
-	retryAftertMU sync.Mutex
-	retryAfter    time.Time
+	mu         sync.Mutex // guards retryAfter
+	retryAfter time.Time
 }
 
 // ClientOption configures a Client before use.

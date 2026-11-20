@@ -3,10 +3,13 @@ package fairgate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -225,9 +228,7 @@ func TestClient_wait_ContextTimeout(t *testing.T) {
 	}
 }
 
-func TestClient_rewindBody_NoBody(t *testing.T) {
-	c := &Client{}
-
+func TestRewindBody_NoBody(t *testing.T) {
 	tests := []struct {
 		name string
 		body io.ReadCloser
@@ -246,7 +247,7 @@ func TestClient_rewindBody_NoBody(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req, _ := http.NewRequest(http.MethodGet, "http://example.com", tt.body)
 
-			err := c.rewindBody(req)
+			_, err := rewindBody(req)
 			if err != nil {
 				t.Errorf("rewindBody() error = %v, want nil for %s", err, tt.name)
 			}
@@ -254,9 +255,7 @@ func TestClient_rewindBody_NoBody(t *testing.T) {
 	}
 }
 
-func TestClient_rewindBody_WithGetBody(t *testing.T) {
-	c := &Client{}
-
+func TestRewindBody_WithGetBody(t *testing.T) {
 	bodyContent := []byte("test request body")
 	body := bytes.NewReader(bodyContent)
 
@@ -272,13 +271,13 @@ func TestClient_rewindBody_WithGetBody(t *testing.T) {
 	}
 
 	// Now rewind
-	err = c.rewindBody(req)
+	rewound, err := rewindBody(req)
 	if err != nil {
 		t.Fatalf("rewindBody() error = %v", err)
 	}
 
 	// Verify we can read the body again
-	rewoundContent, err := io.ReadAll(req.Body)
+	rewoundContent, err := io.ReadAll(rewound.Body)
 	if err != nil {
 		t.Fatalf("failed to read rewound body: %v", err)
 	}
@@ -288,9 +287,7 @@ func TestClient_rewindBody_WithGetBody(t *testing.T) {
 	}
 }
 
-func TestClient_rewindBody_NoGetBody(t *testing.T) {
-	c := &Client{}
-
+func TestRewindBody_NoGetBody(t *testing.T) {
 	// Create a request with a body but no GetBody function
 	req, err := http.NewRequest(
 		http.MethodPost,
@@ -304,9 +301,9 @@ func TestClient_rewindBody_NoGetBody(t *testing.T) {
 	// Clear GetBody to simulate a non-rewindable body
 	req.GetBody = nil
 
-	err = c.rewindBody(req)
+	_, err = rewindBody(req)
 	if err == nil {
-		t.Error("rewindBody() should return error when GetBody is nil")
+		t.Fatal("rewindBody() should return error when GetBody is nil")
 	}
 
 	if !strings.Contains(err.Error(), "GetBody is nil") {
@@ -375,5 +372,103 @@ func TestClient_wait_ConcurrentAccess(t *testing.T) {
 
 	for range 5 {
 		<-done
+	}
+}
+
+// newAuthenticatedTestClient returns a client for server with a valid token
+// already in place.
+func newAuthenticatedTestClient(t *testing.T, server *httptest.Server) *Client {
+	t.Helper()
+	privateKey, publicKey := generateTestKeyPair(t)
+
+	c := New("test-org", publicKey,
+		WithHTTPClient(server.Client()),
+		WithBaseURL(mustParseURL(server.URL)),
+	)
+	err := c.auth.updateToken(CreateTokenResponse{
+		Token:        createTestToken(t, privateKey, time.Now().Add(time.Hour)),
+		RefreshToken: "refresh",
+	})
+	if err != nil {
+		t.Fatalf("updateToken() error = %v", err)
+	}
+
+	return c
+}
+
+func TestClient_do_RetriesRateLimit(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `"payload"` {
+			t.Errorf("attempt %d body = %q, want %q", calls.Load()+1, body, `"payload"`)
+		}
+		if calls.Add(1) == 1 {
+			w.Header().Set("X-Ratelimit-Retry-After", strconv.FormatInt(time.Now().Unix(), 10))
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true,"data":"ok"}`))
+	}))
+	defer server.Close()
+
+	c := newAuthenticatedTestClient(t, server)
+	req, err := c.newRequest(context.Background(), http.MethodPost, "/x", nil, "payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := doJSON[string](c, req)
+	if err != nil {
+		t.Fatalf("doJSON() error = %v", err)
+	}
+	if got != "ok" {
+		t.Errorf("doJSON() = %q, want ok", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("server called %d times, want 2", n)
+	}
+}
+
+func TestClient_do_RateLimitGivesUp(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("X-Ratelimit-Retry-After", strconv.FormatInt(time.Now().Unix(), 10))
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	c := newAuthenticatedTestClient(t, server)
+	req, err := c.newRequest(context.Background(), http.MethodGet, "/x", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.do(req)
+	if !errors.Is(err, ErrRateLimit) {
+		t.Errorf("do() error = %v, want ErrRateLimit", err)
+	}
+	if n := calls.Load(); n != maxAttempts {
+		t.Errorf("server called %d times, want %d", n, maxAttempts)
+	}
+}
+
+func TestClient_do_StatusError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":404,"success":false,"message":"contact not found"}`))
+	}))
+	defer server.Close()
+
+	c := newAuthenticatedTestClient(t, server)
+	_, err := c.Contact(context.Background(), 1)
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("Contact() error = %v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound || apiErr.Message != "contact not found" {
+		t.Errorf("APIError = %+v", apiErr)
 	}
 }

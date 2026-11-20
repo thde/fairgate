@@ -687,7 +687,7 @@ func TestClient_TokenRefresh_FallsBackToCreate(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-org", publicKey,
+	client := New("test-org", publicKey,
 		WithHTTPClient(server.Client()),
 		WithBaseURL(mustParseURL(server.URL)),
 		WithAccessKey("access-key"),
@@ -718,7 +718,7 @@ func TestClient_TokenCreate_StoresAccessKey(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-org", publicKey,
+	client := New("test-org", publicKey,
 		WithHTTPClient(server.Client()),
 		WithBaseURL(mustParseURL(server.URL)),
 	)

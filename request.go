@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,6 +51,9 @@ func (c *Client) newRequest(
 	return req, nil
 }
 
+// maxAttempts bounds how often a request is sent when it is rate limited.
+const maxAttempts = 5
+
 // doJSON executes the request and decodes the response envelope into T.
 func doJSON[T any](c *Client, req *http.Request) (T, error) {
 	resp, err := c.do(req)
@@ -62,67 +66,78 @@ func doJSON[T any](c *Client, req *http.Request) (T, error) {
 	return decodeResponse[T](resp)
 }
 
-// do executes the request with automatic token refresh and rate limit retries.
+// do sends the request with authentication, retrying up to maxAttempts
+// times while rate limited. It returns a response with a 2xx status, or an
+// error. req itself is not modified.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
-	if err := c.wait(req.Context()); err != nil {
-		return nil, err
-	}
+	ctx := req.Context()
 
-	token, err := c.validToken(req.Context())
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		if resp != nil && resp.Body != nil {
-			_ = resp.Body.Close()
+	for attempt := 1; ; attempt++ {
+		if err := c.wait(ctx); err != nil {
+			return nil, err
 		}
 
-		return nil, err
-	}
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		if resp.Body != nil {
-			_ = resp.Body.Close()
-		}
-
-		err := c.handleRetryAfter(resp.Header.Get("X-Ratelimit-Retry-After"))
+		token, err := c.validToken(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("too many requests: %w, %w", err, ErrRateLimit)
+			return nil, err
 		}
 
-		if err := c.rewindBody(req); err != nil {
-			return resp, fmt.Errorf("cannot rewind body: %w, %w", err, ErrRateLimit)
+		r, err := rewindBody(req)
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := c.httpClient.Do(r)
+		if err != nil {
+			return nil, err
 		}
 
-		return c.do(req)
-	}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return resp, nil
+		}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		return nil, newAPIError(resp)
-	}
+		apiErr := newAPIError(resp)
+		drainAndClose(resp.Body)
 
-	return resp, nil
+		if resp.StatusCode != http.StatusTooManyRequests {
+			return nil, apiErr
+		}
+		if attempt == maxAttempts {
+			return nil, fmt.Errorf("%w after %d attempts: %w", ErrRateLimit, attempt, apiErr)
+		}
+		if err := c.handleRetryAfter(resp.Header.Get("X-Ratelimit-Retry-After")); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrRateLimit, err)
+		}
+	}
+}
+
+// drainAndClose reads a bounded amount of the remaining body so the
+// connection can be reused, then closes it.
+func drainAndClose(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxErrorBody))
+	_ = body.Close()
 }
 
 // wait checks if the client is currently rate-limited.
 // If so, it blocks until the reset time or until the context is canceled.
 func (c *Client) wait(ctx context.Context) error {
-	c.retryAftertMU.Lock()
+	c.mu.Lock()
 	waitUntil := c.retryAfter
-	c.retryAftertMU.Unlock()
+	c.mu.Unlock()
 
-	if time.Now().After(waitUntil) {
+	d := time.Until(waitUntil)
+	if d <= 0 {
 		return nil
 	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(time.Until(waitUntil)):
+	case <-timer.C:
 		return nil
 	}
 }
@@ -131,7 +146,7 @@ func (c *Client) wait(ctx context.Context) error {
 // value in the X-Ratelimit-Retry-After header.
 func (c *Client) handleRetryAfter(header string) error {
 	if header == "" {
-		return fmt.Errorf("missing X-Ratelimit-Retry-After header")
+		return errors.New("missing X-Ratelimit-Retry-After header")
 	}
 
 	ts, err := strconv.ParseInt(header, 10, 64)
@@ -141,8 +156,8 @@ func (c *Client) handleRetryAfter(header string) error {
 
 	t := time.Unix(ts, 0)
 
-	c.retryAftertMU.Lock()
-	defer c.retryAftertMU.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if t.After(c.retryAfter) {
 		c.retryAfter = t
@@ -151,24 +166,24 @@ func (c *Client) handleRetryAfter(header string) error {
 	return nil
 }
 
-// rewindBody attempts to reset the request body for a retry.
-func (c *Client) rewindBody(req *http.Request) error {
-	// If there is no body, there is nothing to rewind.
+// rewindBody returns a copy of req with a fresh body, so it can be sent
+// again. req itself is not modified.
+func rewindBody(req *http.Request) (*http.Request, error) {
+	r := req.Clone(req.Context())
 	if req.Body == nil || req.Body == http.NoBody {
-		return nil
+		return r, nil
 	}
 
-	// If GetBody is nil, we cannot recreate the reader.
-	// This happens with io.Pipe or raw io.Reader inputs.
+	// GetBody is nil for bodies that cannot be recreated, such as an io.Pipe.
 	if req.GetBody == nil {
-		return fmt.Errorf("cannot rewind body: GetBody is nil")
+		return nil, errors.New("fairgate: cannot rewind body: GetBody is nil")
 	}
 
-	freshBody, err := req.GetBody()
+	body, err := req.GetBody()
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("fairgate: cannot rewind body: %w", err)
 	}
+	r.Body = body
 
-	req.Body = freshBody
-	return nil
+	return r, nil
 }
