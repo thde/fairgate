@@ -11,8 +11,10 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -130,104 +132,102 @@ func TestClient_handleRetryAfter_OnlyUpdatesIfLater(t *testing.T) {
 	}
 }
 
-func TestClient_wait_NoWaiting(t *testing.T) {
-	c := &Client{}
+// The wait tests run in a synctest bubble, where time is fake and only
+// advances while every goroutine is blocked, so durations are exact.
 
-	// Set retry time to the past
-	c.retryAfter = time.Now().Add(-1 * time.Second)
-
-	start := time.Now()
-	err := c.wait(context.Background())
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Errorf("wait() error = %v, want nil", err)
+func TestClient_wait(t *testing.T) {
+	tests := []struct {
+		name    string
+		retryIn time.Duration // relative to now; 0 leaves retryAfter unset
+		want    time.Duration
+	}{
+		{name: "retryAfter unset", want: 0},
+		{name: "retryAfter in the past", retryIn: -time.Second, want: 0},
+		{
+			name:    "retryAfter in the future",
+			retryIn: 200 * time.Millisecond,
+			want:    200 * time.Millisecond,
+		},
 	}
 
-	// Should return immediately
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("wait() took %v, should be nearly instant", elapsed)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c := &Client{}
+				if tt.retryIn != 0 {
+					c.retryAfter = time.Now().Add(tt.retryIn)
+				}
 
-func TestClient_wait_WaitsUntilTime(t *testing.T) {
-	c := &Client{}
-
-	// Set retry time to 200ms in the future
-	waitDuration := 200 * time.Millisecond
-	c.retryAfter = time.Now().Add(waitDuration)
-
-	start := time.Now()
-	err := c.wait(context.Background())
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Errorf("wait() error = %v, want nil", err)
-	}
-
-	// Should wait approximately the specified duration
-	// Allow some tolerance for timing inaccuracy
-	if elapsed < waitDuration-50*time.Millisecond {
-		t.Errorf("wait() took %v, expected at least %v", elapsed, waitDuration-50*time.Millisecond)
-	}
-	if elapsed > waitDuration+150*time.Millisecond {
-		t.Errorf(
-			"wait() took %v, expected no more than %v",
-			elapsed,
-			waitDuration+150*time.Millisecond,
-		)
+				start := time.Now()
+				if err := c.wait(t.Context()); err != nil {
+					t.Fatalf("wait() error = %v, want nil", err)
+				}
+				if got := time.Since(start); got != tt.want {
+					t.Errorf("wait() took %v, want %v", got, tt.want)
+				}
+			})
+		})
 	}
 }
 
 func TestClient_wait_ContextCancellation(t *testing.T) {
-	c := &Client{}
+	synctest.Test(t, func(t *testing.T) {
+		c := &Client{}
+		c.retryAfter = time.Now().Add(10 * time.Second)
 
-	// Set retry time far in the future
-	c.retryAfter = time.Now().Add(10 * time.Second)
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			cancel()
+		}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Cancel after a short delay
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
-
-	start := time.Now()
-	err := c.wait(ctx)
-	elapsed := time.Since(start)
-
-	if err != context.Canceled {
-		t.Errorf("wait() error = %v, want context.Canceled", err)
-	}
-
-	// Should return quickly due to cancellation
-	if elapsed > 1*time.Second {
-		t.Errorf("wait() took %v, should return quickly after cancellation", elapsed)
-	}
+		start := time.Now()
+		if err := c.wait(ctx); !errors.Is(err, context.Canceled) {
+			t.Errorf("wait() error = %v, want context.Canceled", err)
+		}
+		if got := time.Since(start); got != 50*time.Millisecond {
+			t.Errorf("wait() took %v, want 50ms", got)
+		}
+	})
 }
 
 func TestClient_wait_ContextTimeout(t *testing.T) {
-	c := &Client{}
+	synctest.Test(t, func(t *testing.T) {
+		c := &Client{}
+		c.retryAfter = time.Now().Add(10 * time.Second)
 
-	// Set retry time far in the future
-	c.retryAfter = time.Now().Add(10 * time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
+		start := time.Now()
+		if err := c.wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("wait() error = %v, want context.DeadlineExceeded", err)
+		}
+		if got := time.Since(start); got != 50*time.Millisecond {
+			t.Errorf("wait() took %v, want 50ms", got)
+		}
+	})
+}
 
-	start := time.Now()
-	err := c.wait(ctx)
-	elapsed := time.Since(start)
+func TestClient_wait_Concurrent(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := &Client{}
+		c.retryAfter = time.Now().Add(100 * time.Millisecond)
+		start := time.Now()
 
-	if err != context.DeadlineExceeded {
-		t.Errorf("wait() error = %v, want context.DeadlineExceeded", err)
-	}
-
-	// Should timeout after approximately 50ms
-	if elapsed > 200*time.Millisecond {
-		t.Errorf("wait() took %v, should timeout quickly", elapsed)
-	}
+		var wg sync.WaitGroup
+		for range 5 {
+			wg.Go(func() {
+				if err := c.wait(t.Context()); err != nil {
+					t.Errorf("wait() error = %v", err)
+				}
+				if got := time.Since(start); got != 100*time.Millisecond {
+					t.Errorf("wait() took %v, want 100ms", got)
+				}
+			})
+		}
+		wg.Wait()
+	})
 }
 
 func TestRewindBody_NoBody(t *testing.T) {
@@ -313,24 +313,6 @@ func TestRewindBody_NoGetBody(t *testing.T) {
 	}
 }
 
-func TestClient_wait_ZeroTime(t *testing.T) {
-	c := &Client{}
-	// retryAfter is zero time by default
-
-	start := time.Now()
-	err := c.wait(context.Background())
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Errorf("wait() error = %v, want nil", err)
-	}
-
-	// Should return immediately for zero time
-	if elapsed > 50*time.Millisecond {
-		t.Errorf("wait() took %v, should be nearly instant for zero time", elapsed)
-	}
-}
-
 func TestClient_handleRetryAfter_ConcurrentAccess(t *testing.T) {
 	c := &Client{}
 
@@ -352,28 +334,6 @@ func TestClient_handleRetryAfter_ConcurrentAccess(t *testing.T) {
 	// Just verify no panic occurred and retryAfter is set
 	if c.retryAfter.IsZero() {
 		t.Error("retryAfter should be set after concurrent updates")
-	}
-}
-
-func TestClient_wait_ConcurrentAccess(t *testing.T) {
-	c := &Client{}
-	c.retryAfter = time.Now().Add(100 * time.Millisecond)
-
-	// Multiple goroutines waiting concurrently
-	done := make(chan bool)
-
-	for range 5 {
-		go func() {
-			err := c.wait(context.Background())
-			if err != nil {
-				t.Errorf("wait() error = %v", err)
-			}
-			done <- true
-		}()
-	}
-
-	for range 5 {
-		<-done
 	}
 }
 
