@@ -50,21 +50,16 @@ func (c *Client) newRequest(
 	return req, nil
 }
 
-// doJSON executes the request and decodes JSON response.
-func (c *Client) doJSON(req *http.Request, v any) (*http.Response, error) {
+// doJSON executes the request and decodes the response envelope into T.
+func doJSON[T any](c *Client, req *http.Request) (T, error) {
 	resp, err := c.do(req)
 	if err != nil {
-		return resp, err
+		var zero T
+		return zero, err
 	}
-	if resp != nil && resp.Body != nil {
-		defer resp.Body.Close()
-	}
+	defer resp.Body.Close()
 
-	if v != nil {
-		err = json.NewDecoder(resp.Body).Decode(v)
-	}
-
-	return resp, err
+	return decodeResponse[T](resp)
 }
 
 // do executes the request with automatic token refresh and rate limit retries.
@@ -107,15 +102,8 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.Body != nil {
-			_ = resp.Body.Close()
-		}
-		return resp, fmt.Errorf(
-			"%s: %d, %w",
-			http.StatusText(resp.StatusCode),
-			resp.StatusCode,
-			ErrStatus,
-		)
+		defer resp.Body.Close()
+		return nil, newAPIError(resp)
 	}
 
 	return resp, nil

@@ -2,7 +2,6 @@ package fairgate
 
 import (
 	"crypto/ecdsa"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -35,17 +34,6 @@ func mustParseURL(rawURL string) *url.URL {
 	}
 	return u
 }
-
-var (
-	// ErrStatus is returned when the API returns an unexpected status code.
-	ErrStatus = errors.New("unexpected status code")
-	// ErrNoAccessKey is returned when no access key is available.
-	ErrNoAccessKey = errors.New("no token available")
-	// ErrNoRefreshToken is returned when no refresh token is available.
-	ErrNoRefreshToken = errors.New("no refresh token available")
-	// ErrRateLimit is returned when the rate limit is exceeded.
-	ErrRateLimit = errors.New("rate limit exceeded")
-)
 
 // Client holds configuration needed to call the Fairgate Standard API.
 // Use [New] to create a new client.

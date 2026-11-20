@@ -1,45 +1,46 @@
 package fairgate
 
 import (
-	"errors"
+	"encoding/json"
 	"fmt"
+	"net/http"
 )
 
-// Response represents a response from the Fairgate API.
+// Response is the envelope wrapping every Fairgate API response.
 type Response[T any] struct {
-	Code    int     `json:"code"`
-	Success bool    `json:"success"`
-	Message string  `json:"message"`
-	Data    T       `json:"data"`
-	Errors  []Error `json:"errors,omitempty"`
+	Code    int          `json:"code"`
+	Success bool         `json:"success"`
+	Message string       `json:"message"`
+	Data    T            `json:"data"`
+	Errors  []FieldError `json:"errors,omitempty"`
 }
 
-// Error returns an error if the response is not successful.
-func (r Response[T]) Error() error {
+// Err returns an [*APIError] if the response reports a failure, or nil.
+func (r Response[T]) Err() error {
 	if r.Success {
 		return nil
 	}
 
-	errs := []error{}
-	if r.Message != "" {
-		errs = append(errs, errors.New(r.Message))
-	}
-	for _, e := range r.Errors {
-		errs = append(errs, error(e))
-	}
-
-	return errors.Join(errs...)
+	return &APIError{StatusCode: r.Code, Message: r.Message, Errors: r.Errors}
 }
 
-// Error represents an error from the API.
-type Error struct {
-	Field   string `json:"field"`
-	Message string `json:"message"`
-}
+// decodeResponse checks the status code of resp and decodes its envelope,
+// returning the payload or an [*APIError]. It does not close the body.
+func decodeResponse[T any](resp *http.Response) (T, error) {
+	var zero T
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return zero, newAPIError(resp)
+	}
 
-// Error implements the error interface.
-func (e Error) Error() string {
-	return fmt.Sprintf("%s: %s", e.Field, e.Message)
+	var r Response[T]
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return zero, fmt.Errorf("fairgate: decode response: %w", err)
+	}
+	if err := r.Err(); err != nil {
+		return zero, err
+	}
+
+	return r.Data, nil
 }
 
 // Pagination represents pagination information from the API.

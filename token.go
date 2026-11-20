@@ -2,7 +2,6 @@ package fairgate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -67,20 +66,14 @@ func (c *Client) TokenCreate(ctx context.Context, accessKey string) error {
 	if err != nil {
 		return err
 	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
-	}
+	defer resp.Body.Close()
 
-	var authResp Response[CreateTokenResponse]
-	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+	data, err := decodeResponse[CreateTokenResponse](resp)
+	if err != nil {
 		return err
 	}
 
-	if err := authResp.Error(); err != nil {
-		return err
-	}
-
-	return c.auth.updateToken(authResp.Data)
+	return c.auth.updateToken(data)
 }
 
 type RefreshTokenRequest struct {
@@ -117,29 +110,14 @@ func (c *Client) TokenRefresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
-	}
+	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf(
-			"%s: %d, %w",
-			http.StatusText(resp.StatusCode),
-			resp.StatusCode,
-			ErrStatus,
-		)
-	}
-
-	var authResp Response[CreateTokenResponse]
-	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+	data, err := decodeResponse[CreateTokenResponse](resp)
+	if err != nil {
 		return err
 	}
 
-	if err := authResp.Error(); err != nil {
-		return err
-	}
-
-	return c.auth.updateToken(authResp.Data)
+	return c.auth.updateToken(data)
 }
 
 // shouldRefresh checks if token needs refreshing.

@@ -190,8 +190,8 @@ type Address struct {
 	PostOfficeBox string `json:"post_office_box,omitempty"`
 }
 
-// Contact retrieves basic contact details
-func (c *Client) Contact(ctx context.Context, contactID int) (*Response[Contact], error) {
+// Contact retrieves the extended details of a single contact.
+func (c *Client) Contact(ctx context.Context, contactID int) (*Contact, error) {
 	path := c.orgPath("/fsa/v2.0/contact/%s/contacts/%d/extended", contactID)
 
 	req, err := c.newRequest(ctx, http.MethodGet, path, nil, nil)
@@ -199,12 +199,12 @@ func (c *Client) Contact(ctx context.Context, contactID int) (*Response[Contact]
 		return nil, err
 	}
 
-	var result Response[Contact]
-	if _, err := c.doJSON(req, &result); err != nil {
+	contact, err := doJSON[Contact](c, req)
+	if err != nil {
 		return nil, err
 	}
 
-	return &result, nil
+	return &contact, nil
 }
 
 // ContactsIter returns an iterator over all contacts.
@@ -236,10 +236,10 @@ func (c *Client) Contacts(ctx context.Context, params PageParams) (*ContactsList
 		return nil, err
 	}
 
-	var result Response[ContactsList]
-	if _, err := c.doJSON(req, &result); err != nil {
+	list, err := doJSON[ContactsList](c, req)
+	if err != nil {
 		return nil, err
 	}
 
-	return &result.Data, nil
+	return &list, nil
 }
