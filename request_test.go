@@ -337,18 +337,39 @@ func TestClient_handleRetryAfter_ConcurrentAccess(t *testing.T) {
 	}
 }
 
-// newAuthenticatedTestClient returns a client for server with a valid token
-// already in place, and the key that signs the client's tokens.
+// handlerTransport is an [http.RoundTripper] that serves requests in
+// memory with an [http.Handler]. Unlike httptest.NewServer it involves no
+// network I/O, so it can be used inside a synctest bubble.
+type handlerTransport struct {
+	handler http.Handler
+}
+
+func (t handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Body != nil {
+		defer r.Body.Close()
+	}
+
+	rec := httptest.NewRecorder()
+	t.handler.ServeHTTP(rec, r)
+
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
+}
+
+// newAuthenticatedTestClient returns a client that is served in memory by
+// handler and has a valid token in place, and the key that signs the
+// client's tokens.
 func newAuthenticatedTestClient(
 	t *testing.T,
-	server *httptest.Server,
+	handler http.Handler,
 ) (*Client, *ecdsa.PrivateKey) {
 	t.Helper()
 	privateKey, publicKey := generateTestKeyPair(t)
 
 	c := New("test-org", publicKey,
-		WithHTTPClient(server.Client()),
-		WithBaseURL(mustParseURL(server.URL)),
+		WithHTTPClient(&http.Client{Transport: handlerTransport{handler}}),
+		WithBaseURL(mustParseURL("http://fairgate.test/")),
 	)
 	err := c.auth.updateToken(CreateTokenResponse{
 		Token:        createTestToken(t, privateKey, time.Now().Add(time.Hour)),
@@ -363,7 +384,7 @@ func newAuthenticatedTestClient(
 
 func TestClient_do_RetriesRateLimit(t *testing.T) {
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if string(body) != `"payload"` {
 			t.Errorf("attempt %d body = %q, want %q", calls.Load()+1, body, `"payload"`)
@@ -374,10 +395,9 @@ func TestClient_do_RetriesRateLimit(t *testing.T) {
 			return
 		}
 		_, _ = w.Write([]byte(`{"success":true,"data":"ok"}`))
-	}))
-	defer server.Close()
+	})
 
-	c, _ := newAuthenticatedTestClient(t, server)
+	c, _ := newAuthenticatedTestClient(t, handler)
 	req, err := c.newRequest(context.Background(), http.MethodPost, "/x", nil, "payload")
 	if err != nil {
 		t.Fatal(err)
@@ -397,14 +417,13 @@ func TestClient_do_RetriesRateLimit(t *testing.T) {
 
 func TestClient_do_RateLimitGivesUp(t *testing.T) {
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("X-Ratelimit-Retry-After", strconv.FormatInt(time.Now().Unix(), 10))
 		w.WriteHeader(http.StatusTooManyRequests)
-	}))
-	defer server.Close()
+	})
 
-	c, _ := newAuthenticatedTestClient(t, server)
+	c, _ := newAuthenticatedTestClient(t, handler)
 	req, err := c.newRequest(context.Background(), http.MethodGet, "/x", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -420,13 +439,12 @@ func TestClient_do_RateLimitGivesUp(t *testing.T) {
 }
 
 func TestClient_do_StatusError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"code":404,"success":false,"message":"contact not found"}`))
-	}))
-	defer server.Close()
+	})
 
-	c, _ := newAuthenticatedTestClient(t, server)
+	c, _ := newAuthenticatedTestClient(t, handler)
 	_, err := c.Contact(context.Background(), 1)
 
 	var apiErr *APIError
@@ -441,7 +459,7 @@ func TestClient_do_StatusError(t *testing.T) {
 func TestClient_do_ReauthenticatesOnce(t *testing.T) {
 	var freshToken atomic.Value
 	var apiCalls, refreshCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/auth/refresh/") {
 			refreshCalls.Add(1)
 			_ = json.NewEncoder(w).Encode(Response[CreateTokenResponse]{
@@ -457,10 +475,9 @@ func TestClient_do_ReauthenticatesOnce(t *testing.T) {
 			return
 		}
 		_, _ = w.Write([]byte(`{"success":true,"data":"ok"}`))
-	}))
-	defer server.Close()
+	})
 
-	c, privateKey := newAuthenticatedTestClient(t, server)
+	c, privateKey := newAuthenticatedTestClient(t, handler)
 	freshToken.Store(createTestToken(t, privateKey, time.Now().Add(2*time.Hour)))
 
 	req, err := c.newRequest(context.Background(), http.MethodGet, "/x", nil, nil)
@@ -479,7 +496,7 @@ func TestClient_do_ReauthenticatesOnce(t *testing.T) {
 func TestClient_do_ReauthenticatesOnlyOnce(t *testing.T) {
 	var freshToken atomic.Value
 	var apiCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/auth/refresh/") {
 			_ = json.NewEncoder(w).Encode(Response[CreateTokenResponse]{
 				Success: true,
@@ -489,10 +506,9 @@ func TestClient_do_ReauthenticatesOnlyOnce(t *testing.T) {
 		}
 		apiCalls.Add(1)
 		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer server.Close()
+	})
 
-	c, privateKey := newAuthenticatedTestClient(t, server)
+	c, privateKey := newAuthenticatedTestClient(t, handler)
 	freshToken.Store(createTestToken(t, privateKey, time.Now().Add(2*time.Hour)))
 
 	req, err := c.newRequest(context.Background(), http.MethodGet, "/x", nil, nil)
@@ -508,4 +524,80 @@ func TestClient_do_ReauthenticatesOnlyOnce(t *testing.T) {
 	if n := apiCalls.Load(); n != 2 {
 		t.Errorf("api calls = %d, want 2", n)
 	}
+}
+
+func TestClient_do_WaitsForRateLimitReset(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// The handler runs in the calling goroutine, so no locking is needed.
+		var calls []time.Time
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls = append(calls, time.Now())
+			if len(calls) == 1 {
+				reset := time.Now().Add(30 * time.Second).Unix()
+				w.Header().Set("X-Ratelimit-Retry-After", strconv.FormatInt(reset, 10))
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = w.Write([]byte(`{"success":true,"data":"ok"}`))
+		})
+
+		c, _ := newAuthenticatedTestClient(t, handler)
+		req, err := c.newRequest(t.Context(), http.MethodGet, "/x", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := doJSON[string](c, req); err != nil {
+			t.Fatalf("doJSON() error = %v", err)
+		}
+
+		if len(calls) != 2 {
+			t.Fatalf("server called %d times, want 2", len(calls))
+		}
+		if got := calls[1].Sub(calls[0]); got != 30*time.Second {
+			t.Errorf("retry sent after %v, want 30s", got)
+		}
+
+		// The reset applies to the client, not just the request that hit it:
+		// a later request goes out immediately once the reset has passed.
+		start := time.Now()
+		if _, err := doJSON[string](c, req); err != nil {
+			t.Fatalf("doJSON() error = %v", err)
+		}
+		if got := calls[2].Sub(start); got != 0 {
+			t.Errorf("request after reset waited %v, want 0", got)
+		}
+	})
+}
+
+func TestClient_do_RateLimitWaitHonoursContext(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls int
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			reset := time.Now().Add(time.Minute).Unix()
+			w.Header().Set("X-Ratelimit-Retry-After", strconv.FormatInt(reset, 10))
+			w.WriteHeader(http.StatusTooManyRequests)
+		})
+
+		c, _ := newAuthenticatedTestClient(t, handler)
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+
+		req, err := c.newRequest(ctx, http.MethodGet, "/x", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		start := time.Now()
+		_, err = c.do(req)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("do() error = %v, want context.DeadlineExceeded", err)
+		}
+		if got := time.Since(start); got != 10*time.Second {
+			t.Errorf("do() returned after %v, want 10s", got)
+		}
+		if calls != 1 {
+			t.Errorf("server called %d times, want 1", calls)
+		}
+	})
 }
