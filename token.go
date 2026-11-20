@@ -55,7 +55,7 @@ func (c *Client) TokenCreate(ctx context.Context, accessKey string) error {
 
 	req, err := c.newRequest(ctx,
 		http.MethodPost,
-		fmt.Sprintf("/fsa/v1.1/auth/create/%s/token", c.oid),
+		c.orgPath("/fsa/v1.1/auth/create/%s/token"),
 		nil,
 		CreateTokenRequest{AccessKey: accessKey},
 	)
@@ -106,7 +106,7 @@ func (c *Client) TokenRefresh(ctx context.Context) error {
 	}
 
 	reqBody := RefreshTokenRequest{RefreshToken: c.auth.refreshToken}
-	path := fmt.Sprintf("/fsa/v1.1/auth/refresh/%s/token", c.oid)
+	path := c.orgPath("/fsa/v1.1/auth/refresh/%s/token")
 
 	req, err := c.newRequest(ctx, http.MethodPost, path, nil, reqBody)
 	if err != nil {

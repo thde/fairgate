@@ -12,15 +12,21 @@ import (
 	"time"
 )
 
-// newRequest creates a new HTTP request.
+// orgPath formats an API path, inserting the path-escaped organisation ID
+// in place of the first %s verb.
+func (c *Client) orgPath(format string, args ...any) string {
+	return fmt.Sprintf(format, append([]any{url.PathEscape(c.orgID)}, args...)...)
+}
+
+// newRequest creates a new HTTP request. path is relative to the base URL
+// and must already be escaped.
 func (c *Client) newRequest(
 	ctx context.Context,
 	method, path string,
 	params url.Values,
 	body any,
 ) (*http.Request, error) {
-	rel := &url.URL{Path: path}
-	u := c.baseURL.ResolveReference(rel)
+	u := c.baseURL.JoinPath(path)
 	u.RawQuery = params.Encode()
 
 	var reqBody io.Reader

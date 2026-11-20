@@ -2,7 +2,6 @@ package fairgate
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"net/http"
 
@@ -193,7 +192,7 @@ type Address struct {
 
 // Contact retrieves basic contact details
 func (c *Client) Contact(ctx context.Context, contactID int) (*Response[Contact], error) {
-	path := fmt.Sprintf("/fsa/v2.0/contact/%s/contacts/%d/extended", c.oid, contactID)
+	path := c.orgPath("/fsa/v2.0/contact/%s/contacts/%d/extended", contactID)
 
 	req, err := c.newRequest(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
@@ -229,7 +228,7 @@ func (c *Client) Contacts(ctx context.Context, params PageParams) (*ContactsList
 	req, err := c.newRequest(
 		ctx,
 		http.MethodGet,
-		fmt.Sprintf("/fsa/v2.0/contact/%s/contacts/extended", c.oid),
+		c.orgPath("/fsa/v2.0/contact/%s/contacts/extended"),
 		v,
 		nil,
 	)

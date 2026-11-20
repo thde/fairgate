@@ -24,6 +24,19 @@ const (
 )
 
 var (
+	productionURL = mustParseURL(ProductionURL)
+	testURL       = mustParseURL(TestURL)
+)
+
+func mustParseURL(rawURL string) *url.URL {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
+
+var (
 	// ErrStatus is returned when the API returns an unexpected status code.
 	ErrStatus = errors.New("unexpected status code")
 	// ErrNoAccessKey is returned when no access key is available.
@@ -37,9 +50,8 @@ var (
 // Client holds configuration needed to call the Fairgate Standard API.
 // Use [New] to create a new client.
 type Client struct {
-	baseURL *url.URL
-
-	oid        string
+	baseURL    *url.URL
+	orgID      string
 	httpClient *http.Client
 	userAgent  string
 
@@ -52,18 +64,17 @@ type Client struct {
 // ClientOption configures a Client before use.
 type ClientOption func(*Client)
 
-// WithBaseURL sets a custom base URL.
+// WithBaseURL sets a custom base URL. Any path in baseURL is kept as a
+// prefix for all API paths.
 func WithBaseURL(baseURL *url.URL) ClientOption {
 	return func(c *Client) {
-		c.baseURL = baseURL
+		c.baseURL = baseURL.JoinPath() // copy, so later changes by the caller don't leak in
 	}
 }
 
 // WithTest configures the client to use the Fairgate test endpoint.
 func WithTest() ClientOption {
 	return func(c *Client) {
-		testURL, _ := url.Parse(TestURL)
-
 		c.baseURL = testURL
 	}
 }
@@ -101,15 +112,13 @@ func WithUserAgent(userAgent string) ClientOption {
 // New creates a Fairgate API client for the provided organisation.
 // The client defaults to the production Fairgate endpoint and applies any
 // provided options.
-func New(oid string, key *ecdsa.PublicKey, opts ...ClientOption) *Client {
-	productionURL, _ := url.Parse(ProductionURL)
-
+func New(orgID string, key *ecdsa.PublicKey, opts ...ClientOption) *Client {
 	c := &Client{
 		baseURL: productionURL,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		oid: oid,
+		orgID: orgID,
 		auth: &tokenStore{
 			parser: jwt.NewParser(
 				jwt.WithValidMethods([]string{signingMethod.Alg()}),

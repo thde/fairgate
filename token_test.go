@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -681,13 +680,4 @@ func TestClient_TokenRefresh_ConcurrentCalls(t *testing.T) {
 	if callCount == 0 {
 		t.Error("server should have been called at least once")
 	}
-}
-
-// Helper function to parse URL (panics on error for test setup)
-func mustParseURL(urlStr string) *url.URL {
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		panic(err)
-	}
-	return u
 }
