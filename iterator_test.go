@@ -144,14 +144,14 @@ func TestIterate_ErrorOnSecondPage(t *testing.T) {
 
 		if params.PageNo == 1 {
 			return []string{
-					"item1",
-					"item2",
-				}, Pagination{
-					TotalRecords: 10,
-					TotalPages:   2,
-					PageNo:       1,
-					PageLimit:    2,
-				}, nil
+				"item1",
+				"item2",
+			}, Pagination{
+				TotalRecords: 10,
+				TotalPages:   2,
+				PageNo:       1,
+				PageLimit:    2,
+			}, nil
 		}
 		return nil, Pagination{}, expectedErr
 	}
